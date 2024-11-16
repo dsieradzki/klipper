@@ -21,6 +21,10 @@ class Heater:
         self.name = config.get_name().split()[-1]
         # Setup sensor
         self.sensor = sensor
+        self.target_min_temp = config.getfloat('target_min_temp', 0.)
+        self.target_max_temp = config.getfloat('target_max_temp', 999.)
+        self.heat_with_heater_bed = config.getboolean("heat_with_heater_bed", False)
+        self.heat_with_heater_bed_tem_add = config.getfloat('heat_with_heater_bed_tem_add', 0.)
         self.min_temp = config.getfloat('min_temp', minval=KELVIN_TO_CELSIUS)
         self.max_temp = config.getfloat('max_temp', above=self.min_temp)
         self.sensor.setup_minmax(self.min_temp, self.max_temp)
@@ -149,7 +153,20 @@ class Heater:
     def cmd_SET_HEATER_TEMPERATURE(self, gcmd):
         temp = gcmd.get_float('TARGET', 0.)
         pheaters = self.printer.lookup_object('heaters')
-        pheaters.set_temperature(self, temp)
+        if self.name == "chamber" :
+            if temp and (temp < max(self.target_min_temp,self.min_temp) or temp > min(self.target_max_temp,self.max_temp)):
+                raise self.printer.command_error(
+                    "Requested temperature (%.1f) out of range (%.1f:%.1f)"
+                    % (temp, max(self.target_min_temp,self.min_temp),min(self.target_max_temp,self.max_temp)))
+            pheaters.set_temperature(self, temp)
+            if self.heat_with_heater_bed and temp > 0.:
+                heater_bed = pheaters.lookup_heater("heater_bed")
+                if heater_bed.target_temp < (temp+self.heat_with_heater_bed_tem_add):
+                    pheaters.set_temperature(heater_bed, (temp+self.heat_with_heater_bed_tem_add))
+                    msg = "The hotbed temperature is too low, and it will automatically heat up to " + str((temp+self.heat_with_heater_bed_tem_add))
+                    gcmd.respond_info(msg)
+        else:
+            pheaters.set_temperature(self, temp)
 
 
 ######################################################################
@@ -184,6 +201,7 @@ PID_SETTLE_SLOPE = .1
 
 class ControlPID:
     def __init__(self, heater, config):
+        self.printer = config.get_printer()
         self.heater = heater
         self.heater_max_power = heater.get_max_power()
         self.Kp = config.getfloat('pid_Kp') / PID_PARAM_BASE
@@ -198,6 +216,7 @@ class ControlPID:
         self.prev_temp_deriv = 0.
         self.prev_temp_integ = 0.
     def temperature_update(self, read_time, temp, target_temp):
+        heater_bed = self.printer.lookup_object('heater_bed')
         time_diff = read_time - self.prev_temp_time
         # Calculate change of temperature
         temp_diff = temp - self.prev_temp
@@ -215,13 +234,24 @@ class ControlPID:
         #logging.debug("pid: %f@%.3f -> diff=%f deriv=%f err=%f integ=%f co=%d",
         #    temp, read_time, temp_diff, temp_deriv, temp_err, temp_integ, co)
         bounded_co = max(0., min(self.heater_max_power, co))
-        self.heater.set_pwm(read_time, bounded_co)
+        if self.heater.name == "chamber" and heater_bed.heater_bed_state != 2 and heater_bed.is_heater_bed == 1:
+            self.heater.set_pwm(read_time, 0.)
+        else:
+            self.heater.set_pwm(read_time, bounded_co)
         # Store state for next measurement
         self.prev_temp = temp
         self.prev_temp_time = read_time
         self.prev_temp_deriv = temp_deriv
         if co == bounded_co:
             self.prev_temp_integ = temp_integ
+        if self.heater.name == "heater_bed" :
+            if target_temp < 70:
+                heater_bed.heater_bed_state = 0
+            elif temp < target_temp - 2.:
+                heater_bed.heater_bed_state = 1
+            else:
+                heater_bed.heater_bed_state = 2
+
     def check_busy(self, eventtime, smoothed_temp, target_temp):
         temp_diff = target_temp - smoothed_temp
         return (abs(temp_diff) > PID_SETTLE_DELTA
