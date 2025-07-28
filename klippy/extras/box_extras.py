@@ -250,7 +250,20 @@ class BoxExtras:
         self.gcode.register_command('TIGHTEN_FILAMENT', self.cmd_TIGHTEN_FILAMENT)
 
         self.box_button_state = 0
-        self.extrude_gcode = "M400\nMOVE_TO_TRASH\nM109 S{hotendtemp}\nG1 E150 F300\nM400\nM104 S0\nM106 S255\nM400\nG4 P10000\nCLEAR_FLUSH\nCLEAR_OOZE\nM106 S0"
+        self.extrude_gcode = """
+        M400
+        MOVE_TO_TRASH
+        M109 S{hotendtemp}
+        G1 E150 F300
+        M400
+        M106 S255
+        M109 S{min_hotendtemp}
+        M104 S0
+        M400
+        CLEAR_FLUSH
+        CLEAR_OOZE
+        M106 S0
+        """
         self.move_heating_gcode = "DISABLE_ALL_SENSOR\nMOVE_TO_TRASH\nM109 S{hotendtemp}"
 
         self.context = pyudev.Context()
@@ -470,13 +483,15 @@ class BoxExtras:
         self.box_button_state = 1
         selected_slot = gcmd.get_int('SLOT', 16)
         stepper = self.printer.lookup_object('box_stepper slot' + str(selected_slot))
-        curt_filament_max_temp = self.get_temp_by_num(selected_slot)['max_temp']
-        preheat_gcode = self.move_heating_gcode.format(hotendtemp=curt_filament_max_temp)
+        curt_filament_temps = self.get_temp_by_num(selected_slot)
+        preheat_gcode = self.move_heating_gcode.format(hotendtemp=curt_filament_temps['max_temp'])
+        min_temp = 120
         max_temp = 240
         if self.b_endstop_state:
             self.gcode.run_script_from_command(preheat_gcode)
             stepper.cmd_EXTRUDER_LOAD(gcmd)
-            max_temp = curt_filament_max_temp
+            min_temp = curt_filament_temps['min_temp']
+            max_temp = curt_filament_temps['max_temp']
         else:
             had_load_extruder = self.get_value_by_key('last_load_slot','slot-1')
             if had_load_extruder == 'slot-1':
@@ -492,8 +507,9 @@ class BoxExtras:
                 self.printer.lookup_object('box_stepper ' + str(had_load_extruder)).cmd_EXTRUDER_UNLOAD(gcmd)
                 self.gcode.run_script_from_command("M400\nM83\nG1 E20 F300\nM400")
                 stepper.cmd_EXTRUDER_LOAD(gcmd)
-                max_temp = max(curt_filament_max_temp, self.get_temp_by_slot(had_load_extruder)['max_temp'])
-        script = self.extrude_gcode.format(hotendtemp=max_temp)
+                min_temp = min(curt_filament_temps['min_temp'], self.get_temp_by_slot(had_load_extruder)['min_temp'])
+                max_temp = max(curt_filament_temps['max_temp'], self.get_temp_by_slot(had_load_extruder)['max_temp'])
+        script = self.extrude_gcode.format(min_hotendtemp=min_temp, hotendtemp=max_temp)
         self.gcode.run_script_from_command(script)
         self.gcode.run_script_from_command("G1 X95 Y290\n")
         self.gcode.run_script_from_command("M400\n")
@@ -504,17 +520,36 @@ class BoxExtras:
         self.box_button_state = 1
         selected_slot = gcmd.get_int('SLOT', 16)
         stepper = self.printer.lookup_object('box_stepper slot' + str(selected_slot))
-        curt_filament_max_temp = self.get_temp_by_num(selected_slot)['max_temp']
-        preheat_gcode = self.move_heating_gcode.format(hotendtemp=curt_filament_max_temp)
-        
+
         if not self.b_endstop_state:
-            self.gcode.run_script_from_command(preheat_gcode)
-            load_script = "M83\nG1 E25 F300\nM400\nCLEAR_FLUSH\nCLEAR_OOZE\n"
-            self.gcode.run_script_from_command("CUT_FILAMENT\nMOVE_TO_TRASH\nM83\n")
-            stepper.cmd_EXTRUDER_UNLOAD(gcmd,False)
+            curt_filament_temps = self.get_temp_by_num(selected_slot)
+
+            load_script = """
+            DISABLE_ALL_SENSOR
+            M104 S{preheat_hotend_temp}
+            CUT_FILAMENT
+            MOVE_TO_TRASH
+            M109 S{hotend_temp}
+            M83
+            """.format(preheat_hotend_temp=curt_filament_temps['min_temp'], hotend_temp=curt_filament_temps['max_temp'])
             self.gcode.run_script_from_command(load_script)
-            
-            self.gcode.run_script_from_command("G1 X95 Y290\nM104 S0\n")
+
+            stepper.cmd_EXTRUDER_UNLOAD(gcmd,False)
+
+            load_script = """
+            M83
+            G1 E25 F300
+            M400
+            M106 S255
+            M109 S{min_hotend_temp}
+            M104 S0
+            CLEAR_FLUSH
+            CLEAR_OOZE
+            M106 S0
+            """.format(min_hotend_temp=curt_filament_temps['min_temp'])
+            self.gcode.run_script_from_command(load_script)
+
+            self.gcode.run_script_from_command("G1 X95 Y290\n")
             self.gcode.run_script_from_command("M400\n")
             self.box_button_state = 0
             return True
